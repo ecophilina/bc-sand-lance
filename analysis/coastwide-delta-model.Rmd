@@ -1,0 +1,642 @@
+---
+title: "Coastwide sand lance model"
+author: "Philina English"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 6, fig.height = 5, 
+  #out.width = '40%',
+  # fig.path=paste0("figs/", spp, "/"),
+  echo = TRUE, warning = FALSE, message = FALSE
+)
+library(here)
+library(readr)
+library(tidyverse)
+# library(gfdata)
+library(sdmTMB)
+
+theme_sleek <- function(base_size = 11, base_family = "") {
+  half_line <- base_size/2
+  theme_light(base_size = base_size, base_family = base_family) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.ticks.length = unit(half_line / 2.2, "pt"),
+      strip.background = element_rect(fill = NA, colour = NA),
+      strip.text.x = element_text(colour = "grey30"),
+      strip.text.y = element_text(colour = "grey30"),
+      axis.text = element_text(colour = "grey30"),
+      axis.title = element_text(colour = "grey30"),
+      legend.title = element_text(colour = "grey30", size = rel(0.9)),
+      panel.border = element_rect(fill = NA, colour = "grey70", linewidth = 1),
+      legend.key.size = unit(0.9, "lines"),
+      legend.text = element_text(size = rel(0.7), colour = "grey30"),
+      legend.key = element_rect(colour = NA, fill = NA),
+      legend.background = element_rect(colour = NA, fill = NA),
+      plot.title = element_text(colour = "grey30", size = rel(1)),
+      plot.subtitle = element_text(colour = "grey30", size = rel(.85))
+    )
+}
+
+theme_set(
+    theme_sleek(base_size = 14) +
+      theme(axis.title = element_blank())
+)
+```
+
+```{r get-data}
+.d <- read_csv(here("data/PSL_survey_sets_with_covariates.csv"))
+glimpse(.d[, 1:40])
+```
+
+```{r, include=FALSE}
+## we could have included bycatch, but there are too few to justify inclusion at this stage
+# d2 <- read_csv(here("data/Bycatch_with_covariates.csv"))
+# glimpse(d2)
+```
+
+Sand lance data from trawl surveys suffers from sometimes being recorded as counts and sometimes as weights. Use simple linear regression to fill in an estimated catch weight / biomass densities for count only values.
+
+
+```{r, include=FALSE}
+# # calculate area_swept incase we wish to use an offset
+# # note: the conversion from count to biomass will also need redoing for to use this
+.d$area_swept1 <- .d$doorspread_m * .d$tow_length_m
+.d$area_swept2 <- .d$doorspread_m * (.d$speed_mpm * .d$duration_min)
+.d$area_swept <- ifelse(!is.na(.d$area_swept1), .d$area_swept1, .d$area_swept2)/1000000
+
+
+# first remove all false 0s in dataframe
+.d$catch_count <- ifelse(.d$catch_weight > 0 & .d$catch_count == 0, NA, .d$catch_count)
+.d$catch_weight <- ifelse(.d$catch_count > 0 & .d$catch_weight == 0, NA, .d$catch_weight)
+.d$density_pcpm2 <- ifelse(.d$catch_weight > 0 & .d$density_pcpm2 == 0, NA, .d$density_pcpm2)
+.d$density_kgpm2 <- ifelse(.d$catch_count > 0 & .d$density_kgpm2 == 0, NA, .d$density_kgpm2)
+
+# create presence-absence variable and make density units per km2 instead of m2
+.d$present <- ifelse(.d$density_pcpm2 > 0|.d$density_kgpm2 > 0, 1, 0)
+
+d2 <- .d %>% 
+  mutate(density_kgkm2 = density_kgpm2*1000000,
+         density_pckm2 = density_pcpm2*1000000
+         )
+
+f1 <- lm(log(catch_weight + 1)~log(catch_count + 1), data = d2)
+
+# fill in missing biomass densities
+d2$catch_weight_est <- ifelse(is.na(d2$catch_weight), 
+                            exp(log(d2$catch_count+1)*f1$coefficients[2] + f1$coefficients[1])-1,
+                            d2$catch_weight)
+```
+
+Plot the filled in estimates of catch weight for samples that only had counts in red. 
+
+```{r warning=FALSE}
+d2 %>% filter(catch_count > 0) %>% 
+ggplot(aes(catch_count, catch_weight)) + 
+  geom_point(aes(catch_count, catch_weight_est), colour = "red") + 
+  geom_point(colour = "black") 
+```
+
+We attempt something similar with density for exploratory purposes, but if possible we will use catch weights with an offset in our models.
+
+```{r}
+# generate simple linear model formula
+f2 <- lm(density_kgkm2~density_pckm2, data = d2)
+
+# fill in missing biomass densities
+d2$density_filled <- ifelse(is.na(d2$density_kgkm2), 
+                            d2$density_pckm2*f2$coefficients[2] + f2$coefficients[1],
+                            d2$density_kgkm2)
+```
+
+Plot the filled in estimates of biomass density for samples that only had counts in red. 
+
+```{r warning=FALSE}
+d2 %>% filter(density_pckm2 > 0) %>% 
+ggplot(aes(density_pckm2, density_kgkm2)) + 
+  geom_point(aes(density_pckm2, density_filled), colour = "red") + 
+  geom_point(colour = "black") 
+```
+
+Plot these biomass density against bathymetry
+```{r}
+d2 %>% filter(present == 1) %>%
+ggplot(aes(-Bathy_mean, density_filled)) + 
+  geom_point(colour = "red") + 
+  geom_point(aes(-Bathy_mean, density_kgkm2), colour = "black")
+```
+
+
+Plot these biomass density against measured depth of the tow
+```{r}
+d2 %>% filter(present == 1) %>%
+ggplot(aes(depth_m, density_filled)) + 
+  geom_point(colour = "red") + 
+  geom_point(aes(depth_m, density_kgkm2), colour = "black")
+```
+
+Compare bathymetry to measured depth
+
+```{r}
+d2 %>% filter(present == 1) %>%
+ggplot(aes(depth_m, -Bathy_mean)) + geom_point(colour = "black", alpha = 0.5)
+```
+
+
+Simplify dataframe
+
+```{r}
+d3 <- d2 %>% select(lon_centroid, lat_centroid, survey_abbrev, fishing_event_id, 
+                    year, month, day, time_deployed, depth_m, 
+                    present, density_filled, 
+                    catch_weight_est, area_swept, 
+                    39:ncol(d2))
+
+d3 <- d3[!is.na(d3$lon_centroid),]
+```
+
+Sand lance were only caught for these surveys: SYN QCS, HS MSA, SYN HS and SYN WCVI. Remove the rest.
+
+```{r}
+# unique(d$survey_abbrev)
+d <- filter(d3, survey_abbrev %in% c("SYN QCS","HS MSA","SYN HS","SYN WCVI"))
+```
+
+Way too many variables! Investigate some correlations:
+
+1. Among temperature variables
+```{r fig.width = 5, fig.height = 4}
+plot(TeSmr_max~TeMin_mean, data= d)
+plot(TeSmr_mean~TeWnt_mean, data= d)
+plot(TeMax_mean~TeMin_mean, data= d)
+plot(TeMin_mean~TeWnt_mean, data= d)
+```
+
+2. Between temperature and depth 
+```{r fig.width = 5, fig.height = 4}
+plot(TeMin_mean~depth_m, data= d)
+plot(TeWnt_mean~depth_m, data= d)
+```
+
+
+3. Among tidal speed variables
+```{r fig.width = 5, fig.height = 4}
+plot(TiMax_mean~TiMin_mean, data= d)
+plot(TiMax_mean~TiWnt_mean, data= d)
+plot(TiMax_mean~TiSmr_mean, data= d)
+```
+
+4. Between bottom terrain variables
+```{r fig.width = 5, fig.height = 4}
+plot(BrBPI_mean~Slope_mean, data= d)
+plot(Grain_mean~Slope_mean, data= d)
+plot(Grain_mean~Grain_std, data= d)
+```
+
+5. Check a variety of variables against sand lance density
+```{r fig.width = 5, fig.height = 4}
+plot(density_filled~TRIx_max, data= d)
+plot(density_filled~FiBPI_mean, data= d)
+plot(density_filled~BrBPI_mean, data= d)
+plot(density_filled~log(Slope_mean+1), data= d)
+plot(density_filled~DisEs_mean, data= d)
+plot(density_filled~Grain_mean, data= d)
+plot(density_filled~Grain_std, data= d)
+```
+
+Decide to keep the following:
+1. Depth - measured depth is depth_m, while model derived depth is Bathy_mean
+2. Terrain type - BrBPI_mean, Slope_mean
+3. Grain - mean and std
+4. Tidal current (TiMax_mean) - flushing of silt and mixing for prey production
+5. Minimum temperature (TeMin_mean) - warmer winter (NOV-JAN) seabed reduces condition 
+
+Need to get rid of NAs in any variables you intend to use. This is the short list of variables that we discussed including:
+
+```{r echo=FALSE}
+d4  <- add_utm_columns(d, ll_names =c("lon_centroid", "lat_centroid"), utm_crs = 32609)
+
+d4 <- d4 %>% select(X, Y, lon_centroid, lat_centroid, survey_abbrev, fishing_event_id, 
+                  year, month, day, time_deployed,
+                  present, density_filled, 
+                  catch_weight_est, area_swept,
+                  depth_m,
+                  Bathy_mean, # included for comparison purposes
+                  BrBPI_mean, Slope_mean, 
+                  Grain_mean, Grain_std, 
+                  TiMax_mean, 
+                  TeMin_mean 
+                  )
+d <- na.omit(d4)
+```
+
+
+Plot raw data to see what survey areas are represented in which years.
+```{r, fig.width = 11, fig.height = 8.5}
+ggplot() + 
+  geom_point(aes(X, Y), data = d, alpha = 0.2, size = 0.5)+
+  geom_point(aes(X, Y), data = filter(d, present ==1), colour = "red", size = 0.5) +
+  facet_wrap(~year)
+```
+
+Due to alternating year survey design, one option is to pair years. 
+```{r}
+d <- d %>% filter(year > 1992) %>% mutate(
+      year_scaled = (year - 2010)/10,
+      year_pair = case_when(
+        year %in% c(1993, 1994) ~ 1993,
+        year %in% c(1995, 1996) ~ 1995,
+        year %in% c(1997, 1998) ~ 1997,
+        year %in% c(1999, 2000) ~ 1999,
+        year %in% c(2001, 2002) ~ 2001,
+        year %in% c(2003, 2004) ~ 2003,
+        year %in% c(2005, 2006) ~ 2005,
+        year %in% c(2007, 2008) ~ 2007,
+        year %in% c(2009, 2010) ~ 2009,
+        year %in% c(2011, 2012) ~ 2011,
+        year %in% c(2013, 2014) ~ 2013,
+        year %in% c(2015, 2016) ~ 2015,
+        year %in% c(2017, 2018) ~ 2017,
+        year %in% c(2019, 2020) ~ 2019,# no WCVI
+        year %in% c(2021, 2022) ~ 2021   
+      ),
+      year_true = year)
+```
+
+
+Odd year data is pooled with subsequent even year, but more data is available in odd years so that's how they are labeled. 
+
+```{r}
+ggplot() + 
+  geom_point(aes(X, Y), data = d, alpha = 0.2, size = 0.5)+
+  geom_point(aes(X, Y), data = filter(d, present ==1), colour = "red", size = 0.5) +
+  facet_wrap(~year_pair)
+```
+Create meshes of a few different resolutions to see what works better.
+Bigger cutoff = coarser mesh = faster model. 
+As long as the mesh isn't too coarse, in which case the model will struggle. 
+
+```{r}
+mesh10 <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 10)
+ggplot() + inlabru::gg(mesh10$mesh) + coord_fixed() +
+  geom_point(aes(X, Y), data = d, alpha = 0.2, size = 0.5)+
+  geom_point(aes(X, Y), data = filter(d, present ==1), colour = "red", size = 0.5)
+```
+
+```{r}
+mesh5 <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 5)
+ggplot() + inlabru::gg(mesh5$mesh) + coord_fixed() +
+  geom_point(aes(X, Y), data = d, alpha = 0.2, size = 0.5)+
+  geom_point(aes(X, Y), data = filter(d, present ==1), colour = "red", size = 0.5)
+```
+
+```{r}
+mesh5 <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 4)
+ggplot() + inlabru::gg(mesh5$mesh) + coord_fixed() +
+  geom_point(aes(X, Y), data = d, alpha = 0.2, size = 0.5)+
+  geom_point(aes(X, Y), data = filter(d, present ==1), colour = "red", size = 0.5)
+```
+### Check distribtions of variables
+
+```{r, fig.width = 5, fig.height = 4}
+hist(d$BrBPI_mean)
+hist(d$Slope_mean)        
+hist(d$Grain_mean)
+hist(d$Grain_std)
+hist(d$TiMax_mean)
+hist(d$TeMin_mean)
+```
+
+Grain size is on an unintuitive scale. Transform it such that larger values represent coarser substrates. 
+Also check if log versions of some variables might reduce leverage.
+
+```{r fig.width = 5, fig.height = 4}
+d <- d %>% mutate(Grain_scaled = -Grain_mean - min(-Grain_mean),
+                  Grain_std_log = log(Grain_std + 1),
+                  Slope_log = log(Slope_mean + 1),
+                  log_depth = log(depth_m)
+                  )
+
+hist(d$Grain_scaled)
+hist(d$Grain_std_log)
+hist(d$Slope_log)
+```
+
+```{r, fig.width = 11, fig.height = 8.5}
+library("PerformanceAnalytics")
+# my_data <- d[, c(12:ncol(d))]
+my_data <- d[, c(12, 17, 21, 22, (ncol(d)-3):ncol(d))]
+chart.Correlation(my_data, histogram=TRUE, pch=19)
+```
+
+Of these shortlisted variables, slope has the most correlations >= 0.3 with the other covariates (4 out of 5); so, we will leave it out of these models.  
+Depth has very high correlations with temperature and grain size, but all three are thought to be very important so we will attempt to include them all. 
+We will assume the relationship with log depth is linear, since we don't have samples in this data that are likely to be too shallow for this species. 
+
+The most efficient way to model this relatively sparse data may be using a spatial model with spatially-varying trends.
+This is most easier to estimate than a fully spatiotemporal model. 
+I tried a bunch of gamms/smoothers, but most variables seemed pretty linear in their effects. 
+
+First I start with a presence-absence model:
+
+```{r}
+msv <- sdmTMB(present ~ 
+                s(year_scaled, k = 3) +
+                poly(BrBPI_mean, 2) + 
+                poly(Grain_scaled, 2) +
+                poly(log(Grain_std+1), 2) +
+                poly(TiMax_mean, 2) + # tidal current - flushing of silt and mixing for prey production
+                poly(TeMin_mean, 2) + # min temperature to represent winter conditions and risk of being too warm
+                log(depth_m),
+             offset = log(d$area_swept),
+             spatial = TRUE,
+             time = "year",
+             spatial_varying = ~ 0 + year_scaled,
+             spatiotemporal = "off",
+             family = binomial(),
+             mesh = mesh5,
+             data = d
+)
+```
+
+
+Check fit?
+```{r message=TRUE}
+sanity(msv)
+```
+
+Print model:
+```{r}
+msv
+```
+
+Try a hurdle model for density: has a bionomial presense-absence component and a gamma component for abundance where present.
+Start with the smallest mesh. Other options available if ranges are large enough to support their use. 
+
+```{r}
+mdg1 <- sdmTMB(catch_weight_est ~ 
+                s(year_scaled, k = 3) +
+                poly(BrBPI_mean, 2) + 
+                poly(Grain_scaled, 2) +
+                poly(log(Grain_std+1), 2) +
+                poly(TiMax_mean, 2) +# tidal current - flushing of silt and mixing for prey production
+                poly(TeMin_mean, 2) + # min temperature to represent winter conditions and risk of being too warm
+                log(depth_m),
+             offset = log(d$area_swept),
+             spatial = TRUE,
+             time = "year",
+             spatial_varying = ~ 0 + year_scaled,
+             spatiotemporal = "off",
+             family = delta_gamma(), # this is changed here
+             mesh = mesh5, 
+             data = d
+)
+```
+
+```{r message=TRUE}
+sanity(mdg1)
+```
+
+```{r}
+mdg1
+```
+
+SE for standard deviation in grain size (Grain_std) are larger than the coefficients in both models, so we will drop it entirely. 
+
+Let's try using GAMs to test which of the other variables likely to show a un-linear effect. 
+This complex model is not converging. 
+Will try dropping the spatially varying trends (replaced with increased flexibility in year smoother). 
+<!-- Could also try a coarser mesh, even though the range on the second component model likely to small to be accurately estimates with a coarser mesh. -->
+
+```{r}
+mdg2 <- sdmTMB(
+                catch_weight_est ~
+                s(year_scaled, k = 5) +
+                s(BrBPI_mean, k = 3) + 
+                s(Grain_scaled, k = 3) +
+                # s(log(Grain_std+1), k = 3) + 
+                s(TiMax_mean, k = 3) + 
+                s(TeMin_mean, k = 3) + 
+                log(depth_m),
+             offset = log(d$area_swept),
+             spatial = TRUE,
+             time = "year",
+             # spatial_varying = ~ 0 + year_scaled,
+             spatiotemporal = "off",
+             family = delta_gamma(),
+             mesh = mesh5,
+             data = d
+)
+```
+
+If you have smoothers on variables that it can't estimate any curve for, the following will throw a red 'x' and a message about ln_smooth_sigma. 
+
+```{r message=TRUE}
+sanity(mdg2)
+```
+
+Large standard errors on the smooth terms are to be expected. 
+
+```{r}
+mdg2
+```
+
+Aside from year, only temperature and BrBPI have smooth term std. dev. >> 0, so we will make the rest of the variables linear.
+
+```{r}
+mdg3 <- sdmTMB(catch_weight_est ~
+                s(year_scaled, k = 3) +
+                poly(BrBPI_mean, 2) +
+                Grain_scaled +
+                TiMax_mean + # not supported for binomial component
+                poly(TeMin_mean, 2) + 
+                log(depth_m),
+             offset = log(d$area_swept),
+             spatial = TRUE,
+             time = "year",
+             spatial_varying = ~ 0 + year_scaled,
+             spatiotemporal = "off",
+             family = delta_gamma(),
+             mesh = mesh5,
+             data = d
+)
+```
+
+```{r message=TRUE}
+sanity(mdg3)
+```
+
+```{r}
+mdg3
+```
+
+Note that the positive component model (model 2: biomass when present) range is estimating quite small for the mesh size. 
+Given how few positive samples we have, interpret this component of the model with caution.
+
+We could in theory include different variables in each component model, but it makes plotting effects more difficult. 
+For this version, only the current variable (TiMax_mean) is clearly not useful in one component model (bionomial). We won't bother to do that here.
+
+```{r, eval=FALSE, echo=FALSE}
+mdg4 <- sdmTMB(
+  list(
+    catch_weight_est ~
+      year_scaled +
+      poly(BrBPI_mean, 2) +
+      Grain_scaled +
+      poly(TeMin_mean, 2) +
+      log(depth_m),
+    catch_weight_est ~
+      year_scaled +
+      poly(BrBPI_mean, 2) +
+      Grain_scaled +
+      TiMax_mean +
+      poly(TeMin_mean, 2) +
+      log(depth_m)
+),
+             offset = log(d$area_swept),
+             spatial = TRUE,
+             time = "year",
+             spatial_varying = ~ 0 + year_scaled,
+             spatiotemporal = "off",
+             family = delta_gamma(),
+             mesh = mesh5,
+             data = d
+)
+
+sanity(mdg4)
+
+mdg4
+```
+
+We now plot the effects found in this simplified hurdle model: 
+
+```{r}
+mdg <- mdg3
+```
+
+```{r}
+visreg_delta(mdg, "year_scaled", scale= "response", model = 1)
+visreg_delta(mdg, "year_scaled", scale= "response", model = 2)
+```
+
+
+```{r}
+visreg_delta(mdg, "BrBPI_mean", scale= "response", model = 1)
+visreg_delta(mdg, "BrBPI_mean", scale= "response", model = 2)
+```
+
+```{r}
+visreg_delta(mdg, "Grain_scaled", scale= "response", model = 1)
+visreg_delta(mdg, "Grain_scaled", scale= "response", model = 2) 
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+visreg_delta(mdg, "Grain_std", scale= "response", model = 1)
+visreg_delta(mdg, "Grain_std", scale= "response", model = 2) 
+```
+
+```{r}
+visreg_delta(mdg, "TiMax_mean", scale= "response", model = 1)
+visreg_delta(mdg, "TiMax_mean", scale= "response", model = 2)
+```
+
+```{r}
+visreg_delta(mdg, "TeMin_mean", scale= "response", model = 1)
+visreg_delta(mdg, "TeMin_mean", scale= "response", model = 2)
+```
+
+```{r}
+visreg_delta(mdg, "depth_m", scale= "response", model = 1)
+visreg_delta(mdg, "depth_m", scale= "response", model = 2)
+```
+
+
+Based on the above plots, BrBPI should probably be dropped from any predictive model, but doing so doesn't noticably change the shape of any of the other relationships. 
+Now generate spatial predictions at the original sample locations:
+
+```{r}
+p <- predict(mdg)
+```
+
+```{r, echo=FALSE}
+options(scipen=999)
+fourth_root_power_trans <- function() {
+  scales::trans_new(
+    name = "fourth root power",
+    transform = function(x) ifelse(x > 0, x^0.25, -(-x)^0.25),
+    inverse = function(x) ifelse(x > 0, x^4, -(-x)^4),
+    domain = c(-Inf, Inf))
+}
+```
+
+### Spatial predictions
+
+```{r, echo=FALSE}
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = plogis(est1)*exp(est2)), size =1, alpha = 0.8) +
+  scale_colour_viridis_c(trans = "fourth_root_power", name = "kg/km2     \n", 
+                         limits = c(0,NA), breaks = c(0, 1, 20, 100, 400))+
+  ggtitle("Predicted biomass (all samples from all years)")
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = plogis(est1)), size =1, alpha = 0.8) +
+  scale_colour_viridis_c(name = "Probability\n") + 
+  ggtitle("Predicted presence (all samples from all years)")
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = exp(est2)), size = 1, alpha = 0.8) +
+  scale_colour_viridis_c(trans = "fourth_root_power", name = "kg/km2     \n", 
+                         limits = c(0,NA), breaks = c(0, 1, 20, 100, 400))+
+  ggtitle("Predicted biomass when present (all samples from all years)")
+```
+
+### Spatially-varying trends
+
+```{r, echo=FALSE}
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = zeta_s_year_scaled1), size = 0.5) +
+  scale_colour_gradient2(mid = "lightgray", name = "zeta") + 
+  ggtitle("Change in probability present per decade (logit space)")
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = zeta_s_year_scaled2), size = 0.5) +
+  scale_colour_gradient2(mid = "lightgray", name = "zeta", breaks = c(-1.5,0, 1.5, 3)) + 
+  ggtitle("Change in biomass per decade (log space)")
+```
+
+### Spatial variation explained by covariates
+
+```{r, echo=FALSE}
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = plogis(est_non_rf1)), size = 0.5) +
+  scale_colour_viridis_c(name = "Probability") + 
+  ggtitle("All habitat covariate effects on presence")
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = exp(est_non_rf2)), size = 0.5) +
+  scale_colour_viridis_c(trans = "fourth_root_power", name = "Biomass   \nkg/km2", 
+                         limits = c(0,NA), breaks = c(0, 1, 20, 100, 400))+
+  ggtitle("All habitat covariate effects on biomass when present")
+```
+
+### Spatial deviations from variation explained by covariates
+
+```{r, echo=FALSE}
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = omega_s1), size = 0.5) +
+  scale_colour_gradient2(mid = "lightgray", name = "zeta") + 
+  ggtitle("Spatial random effects on presence (logit space)")
+
+ggplot(p) + 
+  geom_point(aes(X, Y, colour = omega_s2), size = 0.5) +
+  scale_colour_gradient2(mid = "lightgray", name = "zeta", breaks = c(-1.5,0, 1.5, 3)) + 
+  ggtitle("Spatial random effects on biomass when present (log space)")
+```
+
+In future, we can use this model to generate predictions from the surrounding waters. 
+We will first need to generate a spatial grid that includes values for all covariates at each location.
